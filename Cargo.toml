@@ -1,0 +1,11 @@
+[package]
+name = "ini-preserve"
+version = "0.1.0"
+edition = "2021"
+description = "Format-preserving INI parser — read, modify and write back INI files without losing comments, ordering or formatting"
+license = "MIT"
+repository = "https://github.com/Le-Syl21/ini-preserve"
+keywords = ["ini", "config", "parser", "preserve", "roundtrip"]
+categories = ["config", "parser-implementations"]
+
+[dependencies]
