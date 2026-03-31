@@ -83,7 +83,17 @@ impl Ini {
     pub fn parse(input: &str) -> Result<Self, String> {
         let mut lines = Vec::new();
 
-        for raw_line in input.lines() {
+        // Use split('\n') instead of lines() to preserve consecutive blank lines
+        let raw_lines: Vec<&str> = input.split('\n').collect();
+        // Remove trailing empty element (artifact of file ending with \n)
+        let raw_lines = if raw_lines.last() == Some(&"") {
+            &raw_lines[..raw_lines.len() - 1]
+        } else {
+            &raw_lines[..]
+        };
+
+        for &raw_line in raw_lines {
+            let raw_line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
             let trimmed = raw_line.trim();
 
             if trimmed.is_empty() {
@@ -564,4 +574,41 @@ Mapping.RightFlipper = Key;229
         assert!(output.contains("MusicVolume = 80"));
         assert!(output.contains("PlayfieldDisplay = Samsung 42\""));
     }
+}
+
+#[test]
+fn roundtrip_real_vpx_ini() {
+    let path = "/home/pincab/.local/share/VPinballX/10.8/VPinballX.ini";
+    if !std::path::Path::new(path).exists() { return; }
+    let input = std::fs::read_to_string(path).unwrap();
+    let ini = Ini::parse(&input).unwrap();
+    let output = ini.to_string();
+    let in_lines: Vec<&str> = input.lines().collect();
+    let out_lines: Vec<&str> = output.lines().collect();
+    assert_eq!(in_lines.len(), out_lines.len(), 
+        "Line count mismatch: input={} output={}", in_lines.len(), out_lines.len());
+}
+
+#[test]
+fn roundtrip_vpx_with_set() {
+    let path = "/home/pincab/.local/share/VPinballX/10.8/VPinballX.ini";
+    if !std::path::Path::new(path).exists() { return; }
+    let input = std::fs::read_to_string(path).unwrap();
+    let mut ini = Ini::parse(&input).unwrap();
+    
+    // Set a value that already exists (empty)
+    ini.set("Player", "PlayfieldDisplay", "Test 42\"");
+    ini.set("Player", "BGSet", "1");
+    
+    let output = ini.to_string();
+    let in_lines: Vec<&str> = input.lines().collect();
+    let out_lines: Vec<&str> = output.lines().collect();
+    
+    eprintln!("Input:  {} lines", in_lines.len());
+    eprintln!("Output: {} lines", out_lines.len());
+    
+    assert_eq!(in_lines.len(), out_lines.len(),
+        "Line count mismatch after set: input={} output={}", in_lines.len(), out_lines.len());
+    assert!(output.contains("PlayfieldDisplay = Test 42\""));
+    assert!(output.contains("BGSet = 1"));
 }
