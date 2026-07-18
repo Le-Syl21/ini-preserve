@@ -38,7 +38,11 @@ jobs:
 
   publish-crate:
     name: Publish to crates.io
-    needs: verify
+    # La publication crates.io est le seul geste irréversible du pipeline
+    # (« yank » ne supprime rien) : elle passe donc en DERNIER, une fois la
+    # release GitHub — elle, révocable — effectivement créée. Si l'ordre était
+    # inverse, une release ratée laisserait un numéro de version brûlé.
+    needs: [verify, github-release]
     # Pas de publish sur les pré-releases (v*-rc/-beta) : un publish crates.io est
     # définitif (on ne peut que « yank »). Gaté au niveau du job pour qu'un tag
     # pré-release ne déclenche même pas de demande d'approbation.
@@ -68,11 +72,7 @@ jobs:
 
   github-release:
     name: GitHub release
-    needs: [verify, publish-crate]
-    # publish-crate est volontairement skippé sur les pré-releases : la release
-    # GitHub doit quand même se faire. On exige donc « verify OK » et « publish
-    # pas en échec » (skipped compris).
-    if: ${{ always() && needs.verify.result == 'success' && needs.publish-crate.result != 'failure' }}
+    needs: verify
     runs-on: ubuntu-latest
     permissions:
       contents: write
