@@ -33,6 +33,10 @@
 //! assert!(output.contains("Width = 3840"));
 //! assert!(output.contains("Height = 2160"));
 //! ```
+//!
+//! # Community & support
+//!
+//! Questions, bugs, beta testing — join the Discord: <https://discord.gg/T37DYHmt2j>
 
 use std::path::Path;
 

@@ -3,6 +3,7 @@
 [![Crates.io](https://img.shields.io/crates/v/ini-preserve.svg)](https://crates.io/crates/ini-preserve)
 [![Documentation](https://docs.rs/ini-preserve/badge.svg)](https://docs.rs/ini-preserve)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Discord](https://img.shields.io/badge/Discord-Le--Syl21%20Tools-5865F2?logo=discord&logoColor=white)](https://discord.gg/T37DYHmt2j)
 
 **Format-preserving INI parser for Rust.**
 
@@ -11,6 +12,12 @@ Read, modify and write back INI files **without losing comments, ordering or for
 Unlike most INI parsers that discard comments and reorder sections when writing,
 `ini-preserve` keeps the original file structure intact. Only the values you explicitly
 change are modified. Everything else (comments, blank lines, key order, spacing around `=`) is preserved.
+
+## Community & support
+
+Questions, bug reports, beta testing, or just want to chat? Join the Discord:
+
+[![Discord](https://img.shields.io/badge/Discord-Le--Syl21%20Tools-5865F2?logo=discord&logoColor=white)](https://discord.gg/T37DYHmt2j)
 
 ## Features
 
