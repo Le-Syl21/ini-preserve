@@ -221,12 +221,7 @@ impl Ini {
             };
             self.lines.insert(idx + 1, new_line);
         } else {
-            // Section doesn't exist — append
-            self.lines.push(Line::Blank(String::new()));
-            self.lines.push(Line::Section {
-                raw: format!("[{}]", section),
-                name: section.to_string(),
-            });
+            self.append_section_header(section);
             self.lines.push(Line::Property {
                 raw: String::new(),
                 key: key.to_string(),
@@ -253,6 +248,50 @@ impl Ini {
             }
         }
         false
+    }
+
+    /// Append a section header, preceded by one blank line — and only one.
+    ///
+    /// The separator is skipped when there is nothing to separate from (an
+    /// empty document would otherwise start with a blank line) and when the
+    /// document already ends with one (which is how a second blank crept in
+    /// after a `remove_section`, since a removal correctly takes the blank
+    /// that followed it).
+    fn append_section_header(&mut self, section: &str) {
+        let needs_separator =
+            !self.lines.is_empty() && !matches!(self.lines.last(), Some(Line::Blank(_)));
+        if needs_separator {
+            self.lines.push(Line::Blank(String::new()));
+        }
+        self.lines.push(Line::Section {
+            raw: format!("[{section}]"),
+            name: section.to_string(),
+        });
+    }
+
+    /// Add an empty section, if it is not already there. Returns true if one
+    /// was added.
+    ///
+    /// [`set`][Self::set] already creates a section when it writes a key into
+    /// one that does not exist, so this is for the case where the header is
+    /// wanted on its own — and for symmetry with
+    /// [`remove_section`][Self::remove_section], which is where anyone will
+    /// look for it.
+    ///
+    /// ```rust
+    /// use ini_preserve::Ini;
+    ///
+    /// let mut ini = Ini::parse("[A]\na = 1\n").unwrap();
+    /// assert!(ini.add_section("B"));
+    /// assert!(!ini.add_section("B"), "already there");
+    /// assert_eq!(ini.to_string(), "[A]\na = 1\n\n[B]\n");
+    /// ```
+    pub fn add_section(&mut self, section: &str) -> bool {
+        if self.sections().contains(&section) {
+            return false;
+        }
+        self.append_section_header(section);
+        true
     }
 
     /// Remove a whole section: its header, its keys, and the blank lines and
@@ -406,6 +445,54 @@ impl std::fmt::Display for Ini {
 
 #[cfg(test)]
 mod tests {
+
+    /// Creating a section in an empty document must not open the file with a
+    /// blank line, and creating one after an existing blank must not double
+    /// it. Both were happening.
+    #[test]
+    fn a_created_section_gets_exactly_one_separating_blank() {
+        let mut empty = Ini::new();
+        empty.set("New", "k", "v");
+        assert_eq!(empty.to_string(), "[New]\nk = v\n", "no leading blank");
+
+        let mut trailing = Ini::parse("[A]\na = 1\n\n").unwrap();
+        trailing.set("New", "k", "v");
+        assert_eq!(
+            trailing.to_string(),
+            "[A]\na = 1\n\n[New]\nk = v\n",
+            "the blank already there is the separator"
+        );
+
+        let mut tight = Ini::parse("[A]\na = 1\n").unwrap();
+        tight.set("New", "k", "v");
+        assert_eq!(tight.to_string(), "[A]\na = 1\n\n[New]\nk = v\n");
+    }
+
+    /// Removing a section and writing it back must land where it started,
+    /// not one blank line further down each time.
+    #[test]
+    fn remove_then_set_is_a_round_trip() {
+        let source = "[A]\na = 1\n\n[B]\nb = 2\n";
+        let mut ini = Ini::parse(source).unwrap();
+        assert!(ini.remove_section("B"));
+        ini.set("B", "b", "2");
+        assert_eq!(ini.to_string(), source);
+    }
+
+    /// `add_section` is the symmetric counterpart of `remove_section`, and
+    /// says no when the section is already there.
+    #[test]
+    fn adding_a_section_that_exists_changes_nothing() {
+        let source = "[A]\na = 1\n";
+        let mut ini = Ini::parse(source).unwrap();
+        assert!(!ini.add_section("A"));
+        assert_eq!(ini.to_string(), source);
+
+        assert!(ini.add_section("B"));
+        assert_eq!(ini.sections(), vec!["A", "B"]);
+        // An empty section is a header and nothing else.
+        assert_eq!(ini.keys("B"), Vec::<(&str, &str)>::new());
+    }
 
     /// The last section has no header after it, so it runs to the end of the
     /// file — the case an "up to the next header" implementation forgets.

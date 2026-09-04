@@ -28,7 +28,7 @@ Questions, bug reports, beta testing, or just want to chat? Join the Discord:
 - **Semicolons in values** — `Key = foo;bar` works correctly (`;` is not treated as inline comment)
 - **Atomic writes** — `save()` writes to a temp file then renames
 - **No dependencies** — pure Rust, no external crates
-- **Simple API** — `load()`, `get()`, `set()`, `remove()`, `remove_section()`, `save()`
+- **Simple API** — `load()`, `get()`, `set()`, `remove()`, `add_section()`, `remove_section()`, `save()`
 
 ## Usage
 
@@ -47,13 +47,18 @@ if let Some(value) = ini.get("Player", "Width") {
 ini.set("Player", "Width", "3840");
 ini.set("Player", "Height", "2160");
 
-// Remove a single key, or a whole section with everything under it
+// Add a section, or remove a single key, or a whole section with its contents
+ini.add_section("Standalone");
 ini.remove("Player", "Height");
 ini.remove_section("Obsolete");
 
 // Save back — comments and formatting preserved
 ini.save("config.ini").unwrap();
 ```
+
+`set()` already creates a section when it writes a key into one that does not
+exist, so `add_section()` is for the case where the header is wanted on its
+own. Either way exactly one blank line separates it from what precedes it.
 
 A section runs from its header to just before the next one, so `remove_section`
 takes its keys, its comments and the blank line that followed it. Comments
