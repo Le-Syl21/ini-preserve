@@ -1,6 +1,6 @@
 [package]
 name = "ini-preserve"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 description = "Format-preserving INI parser — read, modify and write back INI files without losing comments, ordering or formatting"
 license = "MIT"

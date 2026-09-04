@@ -28,7 +28,7 @@ Questions, bug reports, beta testing, or just want to chat? Join the Discord:
 - **Semicolons in values** — `Key = foo;bar` works correctly (`;` is not treated as inline comment)
 - **Atomic writes** — `save()` writes to a temp file then renames
 - **No dependencies** — pure Rust, no external crates
-- **Simple API** — `load()`, `get()`, `set()`, `save()`
+- **Simple API** — `load()`, `get()`, `set()`, `remove()`, `remove_section()`, `save()`
 
 ## Usage
 
@@ -47,9 +47,18 @@ if let Some(value) = ini.get("Player", "Width") {
 ini.set("Player", "Width", "3840");
 ini.set("Player", "Height", "2160");
 
+// Remove a single key, or a whole section with everything under it
+ini.remove("Player", "Height");
+ini.remove_section("Obsolete");
+
 // Save back — comments and formatting preserved
 ini.save("config.ini").unwrap();
 ```
+
+A section runs from its header to just before the next one, so `remove_section`
+takes its keys, its comments and the blank line that followed it. Comments
+written *above* the header are left alone — they are as likely to be a
+file-level banner as a description of the section.
 
 ## Why?
 

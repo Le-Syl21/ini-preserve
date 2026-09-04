@@ -255,6 +255,71 @@ impl Ini {
         false
     }
 
+    /// Remove a whole section: its header, its keys, and the blank lines and
+    /// comments that sit inside it. Returns true if a section was removed.
+    ///
+    /// A section runs from its header to just before the next header, so
+    /// everything written under it goes with it — including the blank line
+    /// that separated it from what follows, which is what stops a removal
+    /// from leaving a growing gap behind.
+    ///
+    /// **Comments above the header stay.** They are as likely to be a
+    /// file-level banner as a description of the section, and silently
+    /// deleting the top of someone's file is the worse mistake of the two.
+    /// Remove them yourself if you want them gone.
+    ///
+    /// A name that appears more than once is removed everywhere, which is the
+    /// only reading of "remove the section" that leaves nothing behind.
+    ///
+    /// ```rust
+    /// use ini_preserve::Ini;
+    ///
+    /// let mut ini = Ini::parse("\
+    /// ; keep me
+    /// [Keep]
+    /// a = 1
+    ///
+    /// ; about Drop
+    /// [Drop]
+    /// b = 2
+    ///
+    /// [Also]
+    /// c = 3
+    /// ").unwrap();
+    ///
+    /// assert!(ini.remove_section("Drop"));
+    /// assert!(!ini.remove_section("Drop"), "already gone");
+    ///
+    /// let out = ini.to_string();
+    /// assert!(!out.contains("[Drop]"));
+    /// assert!(!out.contains("b = 2"));
+    /// assert!(out.contains("; keep me"));
+    /// assert!(out.contains("[Also]"));
+    /// // The comment written above the header is left where it was.
+    /// assert!(out.contains("; about Drop"));
+    /// ```
+    pub fn remove_section(&mut self, section: &str) -> bool {
+        let mut kept: Vec<Line> = Vec::with_capacity(self.lines.len());
+        let mut dropping = false;
+        let mut removed = false;
+        for line in std::mem::take(&mut self.lines) {
+            if let Line::Section { name, .. } = &line {
+                // A new header always ends the previous section, whether or
+                // not it is the one being dropped.
+                dropping = name == section;
+                if dropping {
+                    removed = true;
+                    continue;
+                }
+            }
+            if !dropping {
+                kept.push(line);
+            }
+        }
+        self.lines = kept;
+        removed
+    }
+
     /// Iterate over all sections and their key-value pairs.
     pub fn sections(&self) -> Vec<&str> {
         let mut result = Vec::new();
@@ -314,11 +379,16 @@ impl std::fmt::Display for Ini {
                             let after_eq = &raw[eq_pos + 1..];
                             let space_before = before_eq.ends_with(' ');
                             // If original value was empty, match the style of the key side
-                            let space_after = after_eq.starts_with(' ') || (after_eq.trim().is_empty() && space_before);
+                            let space_after = after_eq.starts_with(' ')
+                                || (after_eq.trim().is_empty() && space_before);
                             write!(f, "{}", key)?;
-                            if space_before { write!(f, " ")? }
+                            if space_before {
+                                write!(f, " ")?
+                            }
                             write!(f, "=")?;
-                            if space_after { write!(f, " ")? }
+                            if space_after {
+                                write!(f, " ")?
+                            }
                             writeln!(f, "{}", value)?;
                         } else {
                             // New property (no raw)
@@ -336,6 +406,64 @@ impl std::fmt::Display for Ini {
 
 #[cfg(test)]
 mod tests {
+
+    /// The last section has no header after it, so it runs to the end of the
+    /// file — the case an "up to the next header" implementation forgets.
+    #[test]
+    fn removing_the_last_section_takes_it_to_the_end_of_the_file() {
+        let mut ini = Ini::parse("[A]\na = 1\n\n[B]\nb = 2\nc = 3\n").unwrap();
+        assert!(ini.remove_section("B"));
+        assert_eq!(ini.to_string(), "[A]\na = 1\n\n");
+        assert_eq!(ini.sections(), vec!["A"]);
+    }
+
+    /// A name written twice is one section as far as `sections()` and `get()`
+    /// are concerned, so removing it has to take both blocks.
+    #[test]
+    fn a_section_written_twice_is_removed_everywhere() {
+        let mut ini =
+            Ini::parse("[Dup]\na = 1\n[Other]\nb = 2\n[Dup]\nc = 3\n[Last]\nd = 4\n").unwrap();
+        assert!(ini.remove_section("Dup"));
+        assert_eq!(ini.sections(), vec!["Other", "Last"]);
+        let out = ini.to_string();
+        assert!(!out.contains("a = 1") && !out.contains("c = 3"));
+        assert!(out.contains("b = 2") && out.contains("d = 4"));
+    }
+
+    /// Removing what is not there must not touch the document.
+    #[test]
+    fn removing_an_absent_section_changes_nothing() {
+        let source = "; banner\n[A]\na = 1\n";
+        let mut ini = Ini::parse(source).unwrap();
+        assert!(!ini.remove_section("Nope"));
+        assert_eq!(ini.to_string(), source);
+    }
+
+    /// The whole point of the crate: what survives a removal is byte-identical
+    /// to what was read, spacing and comments included.
+    #[test]
+    fn what_survives_a_removal_is_untouched() {
+        let source = "\
+; file banner
+[Keep]
+   spaced   =   value
+# a hash comment
+other=1
+
+[Gone]
+x = 1
+[Tail]
+y = 2
+";
+        let mut ini = Ini::parse(source).unwrap();
+        assert!(ini.remove_section("Gone"));
+        let out = ini.to_string();
+        assert!(out.contains("   spaced   =   value"), "spacing preserved");
+        assert!(out.contains("# a hash comment"));
+        assert!(out.contains("; file banner"));
+        assert!(!out.contains("[Gone]") && !out.contains("x = 1"));
+        assert!(out.contains("[Tail]") && out.contains("y = 2"));
+    }
     use super::*;
 
     #[test]
@@ -448,14 +576,8 @@ Mapping.LeftFlipper = Key;225
 Mapping.Start = Key;30|Joy1;5
 ";
         let ini = Ini::parse(input).unwrap();
-        assert_eq!(
-            ini.get("Input", "Mapping.LeftFlipper"),
-            Some("Key;225")
-        );
-        assert_eq!(
-            ini.get("Input", "Mapping.Start"),
-            Some("Key;30|Joy1;5")
-        );
+        assert_eq!(ini.get("Input", "Mapping.LeftFlipper"), Some("Key;225"));
+        assert_eq!(ini.get("Input", "Mapping.Start"), Some("Key;30|Joy1;5"));
 
         // Roundtrip
         let output = ini.to_string();
@@ -583,36 +705,50 @@ Mapping.RightFlipper = Key;229
 #[test]
 fn roundtrip_real_vpx_ini() {
     let path = "/home/pincab/.local/share/VPinballX/10.8/VPinballX.ini";
-    if !std::path::Path::new(path).exists() { return; }
+    if !std::path::Path::new(path).exists() {
+        return;
+    }
     let input = std::fs::read_to_string(path).unwrap();
     let ini = Ini::parse(&input).unwrap();
     let output = ini.to_string();
     let in_lines: Vec<&str> = input.lines().collect();
     let out_lines: Vec<&str> = output.lines().collect();
-    assert_eq!(in_lines.len(), out_lines.len(), 
-        "Line count mismatch: input={} output={}", in_lines.len(), out_lines.len());
+    assert_eq!(
+        in_lines.len(),
+        out_lines.len(),
+        "Line count mismatch: input={} output={}",
+        in_lines.len(),
+        out_lines.len()
+    );
 }
 
 #[test]
 fn roundtrip_vpx_with_set() {
     let path = "/home/pincab/.local/share/VPinballX/10.8/VPinballX.ini";
-    if !std::path::Path::new(path).exists() { return; }
+    if !std::path::Path::new(path).exists() {
+        return;
+    }
     let input = std::fs::read_to_string(path).unwrap();
     let mut ini = Ini::parse(&input).unwrap();
-    
+
     // Set a value that already exists (empty)
     ini.set("Player", "PlayfieldDisplay", "Test 42\"");
     ini.set("Player", "BGSet", "1");
-    
+
     let output = ini.to_string();
     let in_lines: Vec<&str> = input.lines().collect();
     let out_lines: Vec<&str> = output.lines().collect();
-    
+
     eprintln!("Input:  {} lines", in_lines.len());
     eprintln!("Output: {} lines", out_lines.len());
-    
-    assert_eq!(in_lines.len(), out_lines.len(),
-        "Line count mismatch after set: input={} output={}", in_lines.len(), out_lines.len());
+
+    assert_eq!(
+        in_lines.len(),
+        out_lines.len(),
+        "Line count mismatch after set: input={} output={}",
+        in_lines.len(),
+        out_lines.len()
+    );
     assert!(output.contains("PlayfieldDisplay = Test 42\""));
     assert!(output.contains("BGSet = 1"));
 }
