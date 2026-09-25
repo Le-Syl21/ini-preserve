@@ -1,0 +1,26 @@
+[package]
+name = "ini-preserve-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.ini-preserve]
+path = ".."
+
+# Its own workspace, so the fuzz crate and its nightly-only build never touch
+# the library's.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "roundtrip"
+path = "fuzz_targets/roundtrip.rs"
+test = false
+doc = false
+bench = false

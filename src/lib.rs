@@ -75,12 +75,23 @@ enum Line {
 #[derive(Clone, Debug)]
 pub struct Ini {
     lines: Vec<Line>,
+    /// The line ending of the source (its first line), given to lines added
+    /// later so a Windows file does not end up with mixed endings. Lines read
+    /// from the source keep their own: a `\r` stays inside their `raw` text.
+    crlf: bool,
+    /// Whether the source ended with a newline. Without it, the last line is
+    /// written without one too, or an unmodified file would not round-trip.
+    final_newline: bool,
 }
 
 impl Ini {
     /// Create an empty INI document.
     pub fn new() -> Self {
-        Self { lines: Vec::new() }
+        Self {
+            lines: Vec::new(),
+            crlf: false,
+            final_newline: true,
+        }
     }
 
     /// Parse an INI document from a string.
@@ -96,8 +107,9 @@ impl Ini {
             &raw_lines[..]
         };
 
+        // A CRLF line keeps its `\r` in `raw`, so Display writes it back as it
+        // was. Every decision below works on trimmed text, which drops it.
         for &raw_line in raw_lines {
-            let raw_line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
             let trimmed = raw_line.trim();
 
             if trimmed.is_empty() {
@@ -129,7 +141,15 @@ impl Ini {
             }
         }
 
-        Ok(Self { lines })
+        let crlf = input
+            .find('\n')
+            .is_some_and(|i| i > 0 && input.as_bytes()[i - 1] == b'\r');
+        let final_newline = input.is_empty() || input.ends_with('\n');
+        Ok(Self {
+            lines,
+            crlf,
+            final_newline,
+        })
     }
 
     /// Load an INI file from disk.
@@ -260,11 +280,12 @@ impl Ini {
     fn append_section_header(&mut self, section: &str) {
         let needs_separator =
             !self.lines.is_empty() && !matches!(self.lines.last(), Some(Line::Blank(_)));
+        let cr = if self.crlf { "\r" } else { "" };
         if needs_separator {
-            self.lines.push(Line::Blank(String::new()));
+            self.lines.push(Line::Blank(cr.to_string()));
         }
         self.lines.push(Line::Section {
-            raw: format!("[{section}]"),
+            raw: format!("[{section}]{cr}"),
             name: section.to_string(),
         });
     }
@@ -400,43 +421,53 @@ impl Default for Ini {
 
 impl std::fmt::Display for Ini {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        for line in &self.lines {
+        let last = self.lines.len().saturating_sub(1);
+        for (i, line) in self.lines.iter().enumerate() {
             match line {
-                Line::Blank(raw) => writeln!(f, "{}", raw)?,
-                Line::Comment(raw) => writeln!(f, "{}", raw)?,
-                Line::Section { raw, .. } => writeln!(f, "{}", raw)?,
+                Line::Blank(raw) | Line::Comment(raw) | Line::Section { raw, .. } => {
+                    f.write_str(raw)?
+                }
                 Line::Property {
                     raw,
                     key,
                     value,
                     modified,
                 } => {
-                    if *modified {
+                    if !*modified {
+                        f.write_str(raw)?;
+                    } else if let Some(eq_pos) = raw.find('=') {
                         // Detect original spacing around '=' and reproduce it
-                        if let Some(eq_pos) = raw.find('=') {
-                            let before_eq = &raw[..eq_pos];
-                            let after_eq = &raw[eq_pos + 1..];
-                            let space_before = before_eq.ends_with(' ');
-                            // If original value was empty, match the style of the key side
-                            let space_after = after_eq.starts_with(' ')
-                                || (after_eq.trim().is_empty() && space_before);
-                            write!(f, "{}", key)?;
-                            if space_before {
-                                write!(f, " ")?
-                            }
-                            write!(f, "=")?;
-                            if space_after {
-                                write!(f, " ")?
-                            }
-                            writeln!(f, "{}", value)?;
-                        } else {
-                            // New property (no raw)
-                            writeln!(f, "{} = {}", key, value)?;
+                        let before_eq = &raw[..eq_pos];
+                        let after_eq = &raw[eq_pos + 1..];
+                        let space_before = before_eq.ends_with(' ');
+                        // If original value was empty, match the style of the key side
+                        let space_after = after_eq.starts_with(' ')
+                            || (after_eq.trim().is_empty() && space_before);
+                        write!(f, "{}", key)?;
+                        if space_before {
+                            write!(f, " ")?
+                        }
+                        write!(f, "=")?;
+                        if space_after {
+                            write!(f, " ")?
+                        }
+                        write!(f, "{}", value)?;
+                        // A line read from the source keeps its own ending.
+                        if raw.ends_with('\r') {
+                            f.write_str("\r")?;
                         }
                     } else {
-                        writeln!(f, "{}", raw)?;
+                        // New property (no raw): the document's line ending.
+                        write!(f, "{} = {}", key, value)?;
+                        if self.crlf {
+                            f.write_str("\r")?;
+                        }
                     }
                 }
+            }
+            // The last line ends the way the source did, with or without one.
+            if i < last || self.final_newline {
+                f.write_str("\n")?;
             }
         }
         Ok(())
@@ -445,6 +476,36 @@ impl std::fmt::Display for Ini {
 
 #[cfg(test)]
 mod tests {
+
+    /// The README promises that an unmodified file writes back identical. A
+    /// file without a final newline gained one, and a Windows file came back
+    /// with LF endings: `\r` was stripped on read and never written again.
+    #[test]
+    fn line_endings_and_final_newline_round_trip() {
+        for input in [
+            "[A]\nk=v",
+            "[A]\r\nk = v\r\n\r\n[B]\r\n",
+            "[A]\r\nk=v",
+            "[A]\nk=v\r\n; mixed\n",
+            "\u{feff}[A]\nk=v",
+            "",
+            "\n",
+        ] {
+            let ini = Ini::parse(input).unwrap();
+            assert_eq!(ini.to_string(), input, "round-trip of {input:?}");
+        }
+    }
+
+    /// Lines added to a Windows file use its CRLF ending, and a changed value
+    /// keeps the ending of the line it replaces.
+    #[test]
+    fn edits_follow_the_source_line_ending() {
+        let mut ini = Ini::parse("[A]\r\nk = 1\r\n").unwrap();
+        ini.set("A", "k", "2");
+        ini.set("A", "n", "3");
+        ini.set("B", "m", "4");
+        assert_eq!(ini.to_string(), "[A]\r\nk = 2\r\nn = 3\r\n\r\n[B]\r\nm = 4\r\n");
+    }
 
     /// Creating a section in an empty document must not open the file with a
     /// blank line, and creating one after an existing blank must not double
