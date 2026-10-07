@@ -82,6 +82,27 @@ pub struct Ini {
     /// Whether the source ended with a newline. Without it, the last line is
     /// written without one too, or an unmodified file would not round-trip.
     final_newline: bool,
+    /// How keys added by `set` are written.
+    key_style: KeyStyle,
+}
+
+/// How [`Ini::set`] writes a key that is not in the document yet.
+///
+/// Existing lines never change their spacing: a modified value keeps the
+/// spacing of the line it replaces. This only decides the shape of lines the
+/// crate creates.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum KeyStyle {
+    /// Follow the document: copy the spacing of the last key of the target
+    /// section, or of the last key before it in the file, so a `key=value`
+    /// file (Qt's `QSettings`, for one) gets `key=value` lines. With no key
+    /// to copy from, fall back to [`Spaced`][KeyStyle::Spaced].
+    #[default]
+    Auto,
+    /// `key = value`
+    Spaced,
+    /// `key=value`, as `QSettings` writes it.
+    Compact,
 }
 
 impl Ini {
@@ -91,6 +112,66 @@ impl Ini {
             lines: Vec::new(),
             crlf: false,
             final_newline: true,
+            key_style: KeyStyle::default(),
+        }
+    }
+
+    /// Choose how keys added by [`set`][Self::set] are written.
+    ///
+    /// ```rust
+    /// use ini_preserve::{Ini, KeyStyle};
+    ///
+    /// let mut ini = Ini::new().with_key_style(KeyStyle::Compact);
+    /// ini.set("General", "launchOnSystemStartup", "true");
+    /// assert_eq!(ini.to_string(), "[General]\nlaunchOnSystemStartup=true\n");
+    /// ```
+    pub fn with_key_style(mut self, style: KeyStyle) -> Self {
+        self.key_style = style;
+        self
+    }
+
+    /// Change how keys added from now on by [`set`][Self::set] are written.
+    pub fn set_key_style(&mut self, style: KeyStyle) {
+        self.key_style = style;
+    }
+
+    /// How keys added by [`set`][Self::set] are written.
+    pub fn key_style(&self) -> KeyStyle {
+        self.key_style
+    }
+
+    /// The `raw` template of a property created by `set`: just the separator
+    /// (Display only reads the spacing around `=` and the line ending from
+    /// it). `like` is the line whose style `Auto` copies, if any.
+    fn new_property_raw(&self, like: Option<usize>) -> String {
+        let spaced = match self.key_style {
+            KeyStyle::Spaced => true,
+            KeyStyle::Compact => false,
+            KeyStyle::Auto => {
+                // The given line, else the last key before the end of the file.
+                let from = like
+                    .and_then(|i| self.lines.get(i))
+                    .filter(|l| matches!(l, Line::Property { .. }))
+                    .or_else(|| {
+                        self.lines
+                            .iter()
+                            .rev()
+                            .find(|l| matches!(l, Line::Property { .. }))
+                    });
+                match from {
+                    Some(Line::Property { raw, .. }) => match raw.find('=') {
+                        Some(eq) => raw[..eq].ends_with(' '),
+                        None => true,
+                    },
+                    _ => true,
+                }
+            }
+        };
+        let cr = if self.crlf { "\r" } else { "" };
+        if spaced {
+            format!(" = {cr}")
+        } else {
+            format!("={cr}")
         }
     }
 
@@ -149,6 +230,7 @@ impl Ini {
             lines,
             crlf,
             final_newline,
+            key_style: KeyStyle::default(),
         })
     }
 
@@ -197,11 +279,23 @@ impl Ini {
     /// Set a value by section and key.
     ///
     /// If the key exists in the section, its value is updated in place.
-    /// If the key doesn't exist but the section does, a new line is appended to the section.
+    /// If the key doesn't exist but the section does, a new line is added
+    /// right after the section's last key (or after its header if it has
+    /// none), so the blank lines and comments that close the section stay
+    /// where they are.
     /// If the section doesn't exist, both section and key are appended at the end.
+    ///
+    /// A new key is written in the [`KeyStyle`] set on the document, which by
+    /// default follows the file's own `key = value` / `key=value` spacing.
     pub fn set(&mut self, section: &str, key: &str, value: &str) {
         let mut in_section = false;
-        let mut section_last_idx: Option<usize> = None;
+        // Where a new key goes: after the section's last key, or after its
+        // header. Not after its last line — that is usually the blank line
+        // separating it from the next section, and a key written there would
+        // get a blank line before it and none after.
+        let mut insert_after: Option<usize> = None;
+        // The section's last key, whose spacing `KeyStyle::Auto` copies.
+        let mut last_key: Option<usize> = None;
 
         // Try to find and update existing key
         for (i, line) in self.lines.iter_mut().enumerate() {
@@ -209,7 +303,7 @@ impl Ini {
                 Line::Section { name, .. } => {
                     in_section = name == section;
                     if in_section {
-                        section_last_idx = Some(i);
+                        insert_after = Some(i);
                     }
                 }
                 Line::Property {
@@ -217,33 +311,36 @@ impl Ini {
                     value: v,
                     modified,
                     ..
-                } if in_section && k == key => {
-                    *v = value.to_string();
-                    *modified = true;
-                    return;
-                }
-                _ => {
-                    if in_section {
-                        section_last_idx = Some(i);
+                } if in_section => {
+                    if k == key {
+                        *v = value.to_string();
+                        *modified = true;
+                        return;
                     }
+                    insert_after = Some(i);
+                    last_key = Some(i);
                 }
+                _ => {}
             }
         }
 
         // Key not found — insert in existing section or create new section
-        if let Some(idx) = section_last_idx {
-            // Section exists, insert after its last line
-            let new_line = Line::Property {
-                raw: String::new(),
-                key: key.to_string(),
-                value: value.to_string(),
-                modified: true,
-            };
-            self.lines.insert(idx + 1, new_line);
+        if let Some(idx) = insert_after {
+            let raw = self.new_property_raw(last_key);
+            self.lines.insert(
+                idx + 1,
+                Line::Property {
+                    raw,
+                    key: key.to_string(),
+                    value: value.to_string(),
+                    modified: true,
+                },
+            );
         } else {
+            let raw = self.new_property_raw(None);
             self.append_section_header(section);
             self.lines.push(Line::Property {
-                raw: String::new(),
+                raw,
                 key: key.to_string(),
                 value: value.to_string(),
                 modified: true,
@@ -457,7 +554,8 @@ impl std::fmt::Display for Ini {
                             f.write_str("\r")?;
                         }
                     } else {
-                        // New property (no raw): the document's line ending.
+                        // Not reached: `set` gives new keys a `raw` holding
+                        // their separator. Kept as a safe default.
                         write!(f, "{} = {}", key, value)?;
                         if self.crlf {
                             f.write_str("\r")?;
@@ -504,7 +602,10 @@ mod tests {
         ini.set("A", "k", "2");
         ini.set("A", "n", "3");
         ini.set("B", "m", "4");
-        assert_eq!(ini.to_string(), "[A]\r\nk = 2\r\nn = 3\r\n\r\n[B]\r\nm = 4\r\n");
+        assert_eq!(
+            ini.to_string(),
+            "[A]\r\nk = 2\r\nn = 3\r\n\r\n[B]\r\nm = 4\r\n"
+        );
     }
 
     /// Creating a section in an empty document must not open the file with a
@@ -527,6 +628,136 @@ mod tests {
         let mut tight = Ini::parse("[A]\na = 1\n").unwrap();
         tight.set("New", "k", "v");
         assert_eq!(tight.to_string(), "[A]\na = 1\n\n[New]\nk = v\n");
+    }
+
+    /// A key added to an existing section goes right after its last key: the
+    /// blank line that closes the section stays in front of the next header
+    /// instead of ending up in front of the new key.
+    #[test]
+    fn a_key_added_to_a_section_gets_no_blank_line() {
+        let mut ini = Ini::parse("[A]\na = 1\n\n[B]\nb = 2\n").unwrap();
+        ini.set("A", "c", "3");
+        assert_eq!(ini.to_string(), "[A]\na = 1\nc = 3\n\n[B]\nb = 2\n");
+
+        // Same for the last section, which has its blank at the end of file.
+        let mut ini = Ini::parse("[A]\na = 1\n\n").unwrap();
+        ini.set("A", "c", "3");
+        assert_eq!(ini.to_string(), "[A]\na = 1\nc = 3\n\n");
+
+        // A section with no key yet gets it right under its header.
+        let mut ini = Ini::parse("[A]\n\n[B]\nb = 2\n").unwrap();
+        ini.set("A", "c", "3");
+        assert_eq!(ini.to_string(), "[A]\nc = 3\n\n[B]\nb = 2\n");
+    }
+
+    /// `KeyStyle::Auto` copies the file's own spacing; the explicit styles
+    /// override it; and a document with nothing to copy keeps the historical
+    /// `key = value`.
+    #[test]
+    fn new_keys_follow_the_requested_style() {
+        let mut ini = Ini::parse("[A]\na=1\n").unwrap();
+        ini.set("A", "b", "2");
+        ini.set("New", "c", "3");
+        assert_eq!(ini.to_string(), "[A]\na=1\nb=2\n\n[New]\nc=3\n");
+
+        let mut ini = Ini::parse("[A]\na = 1\n").unwrap();
+        ini.set("A", "b", "2");
+        assert_eq!(ini.to_string(), "[A]\na = 1\nb = 2\n");
+
+        // The target section's own style wins over the rest of the file.
+        let mut ini = Ini::parse("[A]\na = 1\n[B]\nb=2\n[C]\nc = 3\n").unwrap();
+        ini.set("B", "x", "y");
+        assert!(ini.to_string().contains("b=2\nx=y\n"));
+
+        let mut ini = Ini::new();
+        ini.set("A", "k", "v");
+        assert_eq!(ini.to_string(), "[A]\nk = v\n");
+
+        let mut ini = Ini::parse("[A]\na = 1\n").unwrap();
+        ini.set_key_style(KeyStyle::Compact);
+        assert_eq!(ini.key_style(), KeyStyle::Compact);
+        ini.set("A", "b", "2");
+        ini.set("A", "a", "9");
+        // An existing line keeps its own spacing whatever the style.
+        assert_eq!(ini.to_string(), "[A]\na = 9\nb=2\n");
+
+        let mut ini = Ini::parse("[A]\r\na=1\r\n")
+            .unwrap()
+            .with_key_style(KeyStyle::Spaced);
+        ini.set("A", "b", "2");
+        assert_eq!(ini.to_string(), "[A]\r\na=1\r\nb = 2\r\n");
+    }
+
+    /// The case that motivated `KeyStyle::Auto`: the Nextcloud desktop
+    /// client's `nextcloud.cfg`, written by Qt's `QSettings`. Adding a folder
+    /// to an account must produce exactly what `QSettings` would have
+    /// written, and leave the `\\` escapes and `@Variant` values alone.
+    #[test]
+    fn qsettings_file_gets_qsettings_lines() {
+        let source = r#"[General]
+clientVersion=3.14.1
+launchOnSystemStartup=true
+
+[Accounts]
+0\Folders\1\ignoreHiddenFiles=false
+0\Folders\1\journalPath=.sync_0123456789ab.db
+0\Folders\1\localPath=/home/user/Nextcloud/
+0\Folders\1\paused=false
+0\Folders\1\targetPath=/
+0\Folders\1\version=2
+0\authType=webflow
+0\dav_user=user
+0\url=https://cloud.example.org
+0\webflow_user=user
+version=2
+
+[Proxy]
+type=2
+"#;
+        let mut ini = Ini::parse(source).unwrap();
+        assert_eq!(ini.to_string(), source, "untouched round-trip");
+        assert_eq!(
+            ini.get("Accounts", r"0\Folders\1\localPath"),
+            Some("/home/user/Nextcloud/")
+        );
+
+        ini.set(
+            "Accounts",
+            r"0\Folders\2\localPath",
+            r"C:\\Users\\me\\Docs/",
+        );
+        ini.set("Accounts", r"0\Folders\2\targetPath", "/Docs");
+        ini.set("Accounts", r"0\Folders\2\paused", "false");
+        ini.set("Accounts", "0\\url", "https://cloud.example.net");
+
+        let expected = r#"[General]
+clientVersion=3.14.1
+launchOnSystemStartup=true
+
+[Accounts]
+0\Folders\1\ignoreHiddenFiles=false
+0\Folders\1\journalPath=.sync_0123456789ab.db
+0\Folders\1\localPath=/home/user/Nextcloud/
+0\Folders\1\paused=false
+0\Folders\1\targetPath=/
+0\Folders\1\version=2
+0\authType=webflow
+0\dav_user=user
+0\url=https://cloud.example.net
+0\webflow_user=user
+version=2
+0\Folders\2\localPath=C:\\Users\\me\\Docs/
+0\Folders\2\targetPath=/Docs
+0\Folders\2\paused=false
+
+[Proxy]
+type=2
+"#;
+        assert_eq!(ini.to_string(), expected);
+        assert_eq!(
+            ini.get("Accounts", r"0\Folders\2\localPath"),
+            Some(r"C:\\Users\\me\\Docs/")
+        );
     }
 
     /// Removing a section and writing it back must land where it started,

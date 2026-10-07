@@ -25,6 +25,7 @@ Questions, bug reports, beta testing, or just want to chat? Join the Discord:
 - **Comments preserved** — `;` and `#` comment lines are kept as-is
 - **Ordering preserved** — sections and keys stay in their original order
 - **Spacing preserved** — `Key=Value`, `Key = Value`, `Key =Value` all keep their style
+- **New keys match the file** — a `Key=Value` file (e.g. Qt `QSettings`) gets `Key=Value` lines, a `Key = Value` file gets `Key = Value`; or force it with `KeyStyle`
 - **Semicolons in values** — `Key = foo;bar` works correctly (`;` is not treated as inline comment)
 - **Atomic writes** — `save()` writes to a temp file then renames
 - **No dependencies** — pure Rust, no external crates
@@ -59,6 +60,25 @@ ini.save("config.ini").unwrap();
 `set()` already creates a section when it writes a key into one that does not
 exist, so `add_section()` is for the case where the header is wanted on its
 own. Either way exactly one blank line separates it from what precedes it.
+
+A key added to an existing section goes right after its last key, with no
+blank line in front of it: the blank line that closes the section stays in
+front of the next header.
+
+New keys are written in the document's `KeyStyle`. The default, `Auto`, copies
+the spacing of the section's last key (or of the file's last key for a new
+section), falling back to `Key = Value` when there is nothing to copy. To
+force a style — for instance to write a fresh `QSettings` file from scratch:
+
+```rust
+use ini_preserve::{Ini, KeyStyle};
+
+let mut ini = Ini::new().with_key_style(KeyStyle::Compact); // or set_key_style()
+ini.set("General", "launchOnSystemStartup", "true");
+assert_eq!(ini.to_string(), "[General]\nlaunchOnSystemStartup=true\n");
+```
+
+Existing lines always keep their own spacing, whatever the style.
 
 A section runs from its header to just before the next one, so `remove_section`
 takes its keys, its comments and the blank line that followed it. Comments

@@ -4,7 +4,7 @@
 
 #![no_main]
 
-use ini_preserve::Ini;
+use ini_preserve::{Ini, KeyStyle};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
@@ -15,6 +15,12 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
     assert_eq!(ini.to_string(), text, "an unmodified file must round-trip byte-identical");
+
+    ini.set_key_style(match data.len() % 3 {
+        0 => KeyStyle::Auto,
+        1 => KeyStyle::Spaced,
+        _ => KeyStyle::Compact,
+    });
 
     let sections: Vec<String> = ini.sections().into_iter().map(String::from).collect();
     for section in sections.iter().take(8) {
