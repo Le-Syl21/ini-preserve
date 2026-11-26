@@ -27,6 +27,12 @@ fuzz_target!(|data: &[u8]| {
         let _ = ini.get(section, "key");
         ini.set(section, "key", "value");
         let _ = ini.remove(section, "key");
+        let keys: Vec<String> = ini.keys(section).iter().map(|(k, _)| k.to_string()).collect();
+        for key in keys.iter().take(4) {
+            if ini.comment(section, key) {
+                let _ = ini.uncomment(section, key);
+            }
+        }
     }
     ini.add_section("Fuzz");
     ini.set("Fuzz", "k", "v");

@@ -477,6 +477,149 @@ impl Ini {
         removed
     }
 
+    /// The text a property line is written as (with its `\r`, if it has one).
+    fn property_text(&self, line: &Line) -> String {
+        let Line::Property {
+            raw,
+            key,
+            value,
+            modified,
+        } = line
+        else {
+            return String::new();
+        };
+        if !*modified {
+            return raw.clone();
+        }
+        let mut out = String::new();
+        if let Some(eq_pos) = raw.find('=') {
+            // Detect original spacing around '=' and reproduce it
+            let before_eq = &raw[..eq_pos];
+            let after_eq = &raw[eq_pos + 1..];
+            let space_before = before_eq.ends_with(' ');
+            // If original value was empty, match the style of the key side
+            let space_after =
+                after_eq.starts_with(' ') || (after_eq.trim().is_empty() && space_before);
+            out.push_str(key);
+            if space_before {
+                out.push(' ');
+            }
+            out.push('=');
+            if space_after {
+                out.push(' ');
+            }
+            out.push_str(value);
+            // A line read from the source keeps its own ending.
+            if raw.ends_with('\r') {
+                out.push('\r');
+            }
+        } else {
+            // Not reached: `set` gives new keys a `raw` holding their
+            // separator. Kept as a safe default.
+            out.push_str(&format!("{key} = {value}"));
+            if self.crlf {
+                out.push('\r');
+            }
+        }
+        out
+    }
+
+    /// Comment a key out: `Width = 1920` becomes `; Width = 1920`, in place,
+    /// so [`uncomment`][Self::uncomment] can bring it back with its value.
+    /// Returns true if the key was found.
+    ///
+    /// The line keeps its indentation, and a key changed with
+    /// [`set`][Self::set] is commented with its new value. Once commented,
+    /// [`get`][Self::get] no longer sees it.
+    ///
+    /// ```rust
+    /// use ini_preserve::Ini;
+    ///
+    /// let mut ini = Ini::parse("[Player]\nWidth = 1920\nHeight = 1080\n").unwrap();
+    /// assert!(ini.comment("Player", "Width"));
+    /// assert_eq!(ini.get("Player", "Width"), None);
+    /// assert_eq!(ini.to_string(), "[Player]\n; Width = 1920\nHeight = 1080\n");
+    ///
+    /// assert!(ini.uncomment("Player", "Width"));
+    /// assert_eq!(ini.get("Player", "Width"), Some("1920"));
+    /// assert_eq!(ini.to_string(), "[Player]\nWidth = 1920\nHeight = 1080\n");
+    /// ```
+    pub fn comment(&mut self, section: &str, key: &str) -> bool {
+        let Some(i) = self.find_property(section, key) else {
+            return false;
+        };
+        let text = self.property_text(&self.lines[i]);
+        let body = text.trim_start();
+        let indent = &text[..text.len() - body.len()];
+        self.lines[i] = Line::Comment(format!("{indent}; {body}"));
+        true
+    }
+
+    /// Bring back a commented-out key: the first `; Key = value` (or
+    /// `# Key = value`) line of the section naming exactly this key becomes
+    /// a live `Key = value` again. Returns true if one was found.
+    ///
+    /// Nothing changes, and false is returned, when the key is already live
+    /// in the section: uncommenting would write it twice. Comments that are
+    /// not a `key = value` line for this key are never touched.
+    ///
+    /// ```rust
+    /// use ini_preserve::Ini;
+    ///
+    /// let mut ini = Ini::parse("[Audio]\n; Volume = 80\n# Note: Mute = 1 is the default\n").unwrap();
+    /// assert!(ini.uncomment("Audio", "Volume"));
+    /// assert_eq!(ini.get("Audio", "Volume"), Some("80"));
+    /// // Only a line of the form `key = value` is a commented key.
+    /// assert!(!ini.uncomment("Audio", "Mute"));
+    /// ```
+    pub fn uncomment(&mut self, section: &str, key: &str) -> bool {
+        if self.find_property(section, key).is_some() {
+            return false;
+        }
+        let mut in_section = false;
+        for i in 0..self.lines.len() {
+            match &self.lines[i] {
+                Line::Section { name, .. } => in_section = name == section,
+                Line::Comment(raw) if in_section => {
+                    let body = raw.trim_start();
+                    let indent = &raw[..raw.len() - body.len()];
+                    let Some(rest) = body.strip_prefix(';').or_else(|| body.strip_prefix('#'))
+                    else {
+                        continue;
+                    };
+                    let line = format!("{indent}{}", rest.trim_start());
+                    let Some(eq) = line.find('=') else { continue };
+                    if line[..eq].trim() != key {
+                        continue;
+                    }
+                    let value = line[eq + 1..].trim().to_string();
+                    self.lines[i] = Line::Property {
+                        raw: line,
+                        key: key.to_string(),
+                        value,
+                        modified: false,
+                    };
+                    return true;
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// Index of the live line holding `key` in `section`, if any.
+    fn find_property(&self, section: &str, key: &str) -> Option<usize> {
+        let mut in_section = false;
+        for (i, line) in self.lines.iter().enumerate() {
+            match line {
+                Line::Section { name, .. } => in_section = name == section,
+                Line::Property { key: k, .. } if in_section && k == key => return Some(i),
+                _ => {}
+            }
+        }
+        None
+    }
+
     /// Iterate over all sections and their key-value pairs.
     pub fn sections(&self) -> Vec<&str> {
         let mut result = Vec::new();
@@ -524,44 +667,7 @@ impl std::fmt::Display for Ini {
                 Line::Blank(raw) | Line::Comment(raw) | Line::Section { raw, .. } => {
                     f.write_str(raw)?
                 }
-                Line::Property {
-                    raw,
-                    key,
-                    value,
-                    modified,
-                } => {
-                    if !*modified {
-                        f.write_str(raw)?;
-                    } else if let Some(eq_pos) = raw.find('=') {
-                        // Detect original spacing around '=' and reproduce it
-                        let before_eq = &raw[..eq_pos];
-                        let after_eq = &raw[eq_pos + 1..];
-                        let space_before = before_eq.ends_with(' ');
-                        // If original value was empty, match the style of the key side
-                        let space_after = after_eq.starts_with(' ')
-                            || (after_eq.trim().is_empty() && space_before);
-                        write!(f, "{}", key)?;
-                        if space_before {
-                            write!(f, " ")?
-                        }
-                        write!(f, "=")?;
-                        if space_after {
-                            write!(f, " ")?
-                        }
-                        write!(f, "{}", value)?;
-                        // A line read from the source keeps its own ending.
-                        if raw.ends_with('\r') {
-                            f.write_str("\r")?;
-                        }
-                    } else {
-                        // Not reached: `set` gives new keys a `raw` holding
-                        // their separator. Kept as a safe default.
-                        write!(f, "{} = {}", key, value)?;
-                        if self.crlf {
-                            f.write_str("\r")?;
-                        }
-                    }
-                }
+                Line::Property { .. } => f.write_str(&self.property_text(line))?,
             }
             // The last line ends the way the source did, with or without one.
             if i < last || self.final_newline {
@@ -574,6 +680,50 @@ impl std::fmt::Display for Ini {
 
 #[cfg(test)]
 mod tests {
+
+    use super::Ini;
+
+    #[test]
+    fn comment_round_trips_byte_identical() {
+        let src = "[A]\r\n  Width = 1920\r\nx=1\r\n";
+        let mut ini = Ini::parse(src).unwrap();
+        assert!(ini.comment("A", "Width"));
+        assert_eq!(ini.to_string(), "[A]\r\n  ; Width = 1920\r\nx=1\r\n");
+        assert!(ini.uncomment("A", "Width"));
+        assert_eq!(ini.to_string(), src);
+        assert_eq!(ini.get("A", "Width"), Some("1920"));
+    }
+
+    #[test]
+    fn comment_keeps_a_changed_value() {
+        let mut ini = Ini::parse("[A]\nk=1\n").unwrap();
+        ini.set("A", "k", "2");
+        assert!(ini.comment("A", "k"));
+        assert_eq!(ini.to_string(), "[A]\n; k=2\n");
+        assert!(ini.uncomment("A", "k"));
+        assert_eq!(ini.get("A", "k"), Some("2"));
+    }
+
+    #[test]
+    fn comment_and_uncomment_stay_in_their_section() {
+        let src = "[A]\n; k = 1\n[B]\nk = 2\n";
+        let mut ini = Ini::parse(src).unwrap();
+        assert!(!ini.comment("A", "k"), "only commented in A");
+        assert!(!ini.uncomment("B", "k"), "already live in B");
+        assert!(!ini.uncomment("C", "k"), "no such section");
+        assert_eq!(ini.to_string(), src);
+        assert!(ini.uncomment("A", "k"));
+        assert_eq!(ini.get("A", "k"), Some("1"));
+        assert_eq!(ini.get("B", "k"), Some("2"));
+    }
+
+    #[test]
+    fn uncomment_takes_the_first_matching_line_only() {
+        let mut ini = Ini::parse("[A]\n; about k\n#k=1\n; k = 2\n; kk = 3\n").unwrap();
+        assert!(ini.uncomment("A", "k"));
+        assert_eq!(ini.to_string(), "[A]\n; about k\nk=1\n; k = 2\n; kk = 3\n");
+        assert!(!ini.uncomment("A", "k"), "now live");
+    }
 
     /// The README promises that an unmodified file writes back identical. A
     /// file without a final newline gained one, and a Windows file came back

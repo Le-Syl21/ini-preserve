@@ -29,7 +29,7 @@ Questions, bug reports, beta testing, or just want to chat? Join the Discord:
 - **Semicolons in values** — `Key = foo;bar` works correctly (`;` is not treated as inline comment)
 - **Atomic writes** — `save()` writes to a temp file then renames
 - **No dependencies** — pure Rust, no external crates
-- **Simple API** — `load()`, `get()`, `set()`, `remove()`, `add_section()`, `remove_section()`, `save()`
+- **Simple API** — `load()`, `get()`, `set()`, `remove()`, `comment()`, `uncomment()`, `add_section()`, `remove_section()`, `save()`
 
 ## Usage
 
@@ -52,6 +52,10 @@ ini.set("Player", "Height", "2160");
 ini.add_section("Standalone");
 ini.remove("Player", "Height");
 ini.remove_section("Obsolete");
+
+// Turn a key off without losing its value ("; VSync = 1"), and back on
+ini.comment("Player", "VSync");
+ini.uncomment("Player", "VSync");
 
 // Save back — comments and formatting preserved
 ini.save("config.ini").unwrap();
