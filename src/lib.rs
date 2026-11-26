@@ -86,6 +86,36 @@ pub struct Ini {
     key_style: KeyStyle,
 }
 
+/// What [`Ini::comment`] or [`Ini::uncomment`] did.
+#[must_use]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyToggle {
+    /// No line of that key was found in the section: nothing changed.
+    Unchanged,
+    /// The key was switched on its one line.
+    Done,
+    /// The key was switched, but it is written on this many lines of the
+    /// section (a duplicate key). Every one of them was processed; the
+    /// count is a warning that the file holds the key more than once.
+    Duplicate(usize),
+}
+
+impl KeyToggle {
+    /// `changed` lines were switched, and the key now stands on `lines` of them.
+    fn from_count(changed: usize, lines: usize) -> Self {
+        match (changed, lines) {
+            (0, _) => Self::Unchanged,
+            (_, 0 | 1) => Self::Done,
+            (_, n) => Self::Duplicate(n),
+        }
+    }
+
+    /// Whether at least one line was switched.
+    pub fn changed(self) -> bool {
+        self != Self::Unchanged
+    }
+}
+
 /// How [`Ini::set`] writes a key that is not in the document yet.
 ///
 /// Existing lines never change their spacing: a modified value keeps the
@@ -526,60 +556,72 @@ impl Ini {
 
     /// Comment a key out: `Width = 1920` becomes `; Width = 1920`, in place,
     /// so [`uncomment`][Self::uncomment] can bring it back with its value.
-    /// Returns true if the key was found.
     ///
-    /// The line keeps its indentation, and a key changed with
-    /// [`set`][Self::set] is commented with its new value. Once commented,
-    /// [`get`][Self::get] no longer sees it.
+    /// Every live line of the key in the section is commented, so the key is
+    /// really off afterwards even when the file wrote it twice; that case is
+    /// reported as [`KeyToggle::Duplicate`]. Lines keep their indentation,
+    /// and a key changed with [`set`][Self::set] is commented with its new
+    /// value. Once commented, [`get`][Self::get] no longer sees it.
     ///
     /// ```rust
-    /// use ini_preserve::Ini;
+    /// use ini_preserve::{Ini, KeyToggle};
     ///
     /// let mut ini = Ini::parse("[Player]\nWidth = 1920\nHeight = 1080\n").unwrap();
-    /// assert!(ini.comment("Player", "Width"));
+    /// assert_eq!(ini.comment("Player", "Width"), KeyToggle::Done);
     /// assert_eq!(ini.get("Player", "Width"), None);
     /// assert_eq!(ini.to_string(), "[Player]\n; Width = 1920\nHeight = 1080\n");
     ///
-    /// assert!(ini.uncomment("Player", "Width"));
+    /// assert_eq!(ini.uncomment("Player", "Width"), KeyToggle::Done);
     /// assert_eq!(ini.get("Player", "Width"), Some("1920"));
     /// assert_eq!(ini.to_string(), "[Player]\nWidth = 1920\nHeight = 1080\n");
     /// ```
-    pub fn comment(&mut self, section: &str, key: &str) -> bool {
-        let Some(i) = self.find_property(section, key) else {
-            return false;
-        };
-        let text = self.property_text(&self.lines[i]);
-        let body = text.trim_start();
-        let indent = &text[..text.len() - body.len()];
-        self.lines[i] = Line::Comment(format!("{indent}; {body}"));
-        true
-    }
-
-    /// Bring back a commented-out key: the first `; Key = value` (or
-    /// `# Key = value`) line of the section naming exactly this key becomes
-    /// a live `Key = value` again. Returns true if one was found.
-    ///
-    /// Nothing changes, and false is returned, when the key is already live
-    /// in the section: uncommenting would write it twice. Comments that are
-    /// not a `key = value` line for this key are never touched.
-    ///
-    /// ```rust
-    /// use ini_preserve::Ini;
-    ///
-    /// let mut ini = Ini::parse("[Audio]\n; Volume = 80\n# Note: Mute = 1 is the default\n").unwrap();
-    /// assert!(ini.uncomment("Audio", "Volume"));
-    /// assert_eq!(ini.get("Audio", "Volume"), Some("80"));
-    /// // Only a line of the form `key = value` is a commented key.
-    /// assert!(!ini.uncomment("Audio", "Mute"));
-    /// ```
-    pub fn uncomment(&mut self, section: &str, key: &str) -> bool {
-        if self.find_property(section, key).is_some() {
-            return false;
-        }
+    pub fn comment(&mut self, section: &str, key: &str) -> KeyToggle {
         let mut in_section = false;
+        let mut changed = 0;
         for i in 0..self.lines.len() {
             match &self.lines[i] {
                 Line::Section { name, .. } => in_section = name == section,
+                Line::Property { key: k, .. } if in_section && k == key => {
+                    let text = self.property_text(&self.lines[i]);
+                    let body = text.trim_start();
+                    let indent = &text[..text.len() - body.len()];
+                    self.lines[i] = Line::Comment(format!("{indent}; {body}"));
+                    changed += 1;
+                }
+                _ => {}
+            }
+        }
+        KeyToggle::from_count(changed, changed)
+    }
+
+    /// Bring back a commented-out key: every `; Key = value` (or
+    /// `# Key = value`) line of the section naming exactly this key becomes
+    /// a live `Key = value` again.
+    ///
+    /// All of them are uncommented, not just the first. When that leaves the
+    /// key live on more than one line (several commented copies, or one that
+    /// was live already), the result is [`KeyToggle::Duplicate`] with the
+    /// number of live lines: [`get`][Self::get] reads the first one, and the
+    /// file is worth cleaning up. Comments that are not a `key = value` line
+    /// for this key are never touched.
+    ///
+    /// ```rust
+    /// use ini_preserve::{Ini, KeyToggle};
+    ///
+    /// let mut ini = Ini::parse("[Audio]\n; Volume = 80\n# Note: Mute = 1 is the default\n").unwrap();
+    /// assert_eq!(ini.uncomment("Audio", "Volume"), KeyToggle::Done);
+    /// assert_eq!(ini.get("Audio", "Volume"), Some("80"));
+    /// // Only a line of the form `key = value` is a commented key.
+    /// assert_eq!(ini.uncomment("Audio", "Mute"), KeyToggle::Unchanged);
+    /// ```
+    pub fn uncomment(&mut self, section: &str, key: &str) -> KeyToggle {
+        let mut in_section = false;
+        let mut changed = 0;
+        let mut live = 0;
+        for i in 0..self.lines.len() {
+            match &self.lines[i] {
+                Line::Section { name, .. } => in_section = name == section,
+                Line::Property { key: k, .. } if in_section && k == key => live += 1,
                 Line::Comment(raw) if in_section => {
                     let body = raw.trim_start();
                     let indent = &raw[..raw.len() - body.len()];
@@ -599,25 +641,13 @@ impl Ini {
                         value,
                         modified: false,
                     };
-                    return true;
+                    changed += 1;
+                    live += 1;
                 }
                 _ => {}
             }
         }
-        false
-    }
-
-    /// Index of the live line holding `key` in `section`, if any.
-    fn find_property(&self, section: &str, key: &str) -> Option<usize> {
-        let mut in_section = false;
-        for (i, line) in self.lines.iter().enumerate() {
-            match line {
-                Line::Section { name, .. } => in_section = name == section,
-                Line::Property { key: k, .. } if in_section && k == key => return Some(i),
-                _ => {}
-            }
-        }
-        None
+        KeyToggle::from_count(changed, live)
     }
 
     /// Iterate over all sections and their key-value pairs.
@@ -681,15 +711,15 @@ impl std::fmt::Display for Ini {
 #[cfg(test)]
 mod tests {
 
-    use super::Ini;
+    use super::{Ini, KeyToggle};
 
     #[test]
     fn comment_round_trips_byte_identical() {
         let src = "[A]\r\n  Width = 1920\r\nx=1\r\n";
         let mut ini = Ini::parse(src).unwrap();
-        assert!(ini.comment("A", "Width"));
+        assert_eq!(ini.comment("A", "Width"), KeyToggle::Done);
         assert_eq!(ini.to_string(), "[A]\r\n  ; Width = 1920\r\nx=1\r\n");
-        assert!(ini.uncomment("A", "Width"));
+        assert_eq!(ini.uncomment("A", "Width"), KeyToggle::Done);
         assert_eq!(ini.to_string(), src);
         assert_eq!(ini.get("A", "Width"), Some("1920"));
     }
@@ -698,9 +728,9 @@ mod tests {
     fn comment_keeps_a_changed_value() {
         let mut ini = Ini::parse("[A]\nk=1\n").unwrap();
         ini.set("A", "k", "2");
-        assert!(ini.comment("A", "k"));
+        assert_eq!(ini.comment("A", "k"), KeyToggle::Done);
         assert_eq!(ini.to_string(), "[A]\n; k=2\n");
-        assert!(ini.uncomment("A", "k"));
+        assert_eq!(ini.uncomment("A", "k"), KeyToggle::Done);
         assert_eq!(ini.get("A", "k"), Some("2"));
     }
 
@@ -708,21 +738,47 @@ mod tests {
     fn comment_and_uncomment_stay_in_their_section() {
         let src = "[A]\n; k = 1\n[B]\nk = 2\n";
         let mut ini = Ini::parse(src).unwrap();
-        assert!(!ini.comment("A", "k"), "only commented in A");
-        assert!(!ini.uncomment("B", "k"), "already live in B");
-        assert!(!ini.uncomment("C", "k"), "no such section");
+        assert_eq!(
+            ini.comment("A", "k"),
+            KeyToggle::Unchanged,
+            "only commented in A"
+        );
+        assert_eq!(
+            ini.uncomment("B", "k"),
+            KeyToggle::Unchanged,
+            "nothing commented in B"
+        );
+        assert_eq!(
+            ini.uncomment("C", "k"),
+            KeyToggle::Unchanged,
+            "no such section"
+        );
         assert_eq!(ini.to_string(), src);
-        assert!(ini.uncomment("A", "k"));
+        assert_eq!(ini.uncomment("A", "k"), KeyToggle::Done);
         assert_eq!(ini.get("A", "k"), Some("1"));
         assert_eq!(ini.get("B", "k"), Some("2"));
     }
 
     #[test]
-    fn uncomment_takes_the_first_matching_line_only() {
-        let mut ini = Ini::parse("[A]\n; about k\n#k=1\n; k = 2\n; kk = 3\n").unwrap();
-        assert!(ini.uncomment("A", "k"));
-        assert_eq!(ini.to_string(), "[A]\n; about k\nk=1\n; k = 2\n; kk = 3\n");
-        assert!(!ini.uncomment("A", "k"), "now live");
+    fn duplicate_keys_are_all_switched_and_reported() {
+        let src = "[A]\nk = 1\nj = 0\nk = 2\n";
+        let mut ini = Ini::parse(src).unwrap();
+        assert_eq!(ini.comment("A", "k"), KeyToggle::Duplicate(2));
+        assert_eq!(ini.get("A", "k"), None, "really off");
+        assert_eq!(ini.to_string(), "[A]\n; k = 1\nj = 0\n; k = 2\n");
+        assert_eq!(ini.uncomment("A", "k"), KeyToggle::Duplicate(2));
+        assert_eq!(ini.to_string(), src);
+        assert!(
+            !ini.uncomment("A", "k").changed(),
+            "nothing left to uncomment"
+        );
+    }
+
+    #[test]
+    fn uncomment_next_to_a_live_key_warns() {
+        let mut ini = Ini::parse("[A]\nk = 1\n; about k\n#k=2\n; kk = 3\n").unwrap();
+        assert_eq!(ini.uncomment("A", "k"), KeyToggle::Duplicate(2));
+        assert_eq!(ini.to_string(), "[A]\nk = 1\n; about k\nk=2\n; kk = 3\n");
     }
 
     /// The README promises that an unmodified file writes back identical. A

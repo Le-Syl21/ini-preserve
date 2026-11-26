@@ -29,8 +29,9 @@ fuzz_target!(|data: &[u8]| {
         let _ = ini.remove(section, "key");
         let keys: Vec<String> = ini.keys(section).iter().map(|(k, _)| k.to_string()).collect();
         for key in keys.iter().take(4) {
-            if ini.comment(section, key) {
-                let _ = ini.uncomment(section, key);
+            if ini.comment(section, key).changed() {
+                assert!(ini.get(section, key).is_none(), "every line of the key is commented");
+                assert!(ini.uncomment(section, key).changed());
             }
         }
     }

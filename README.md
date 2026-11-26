@@ -34,7 +34,7 @@ Questions, bug reports, beta testing, or just want to chat? Join the Discord:
 ## Usage
 
 ```rust
-use ini_preserve::Ini;
+use ini_preserve::{Ini, KeyToggle};
 
 // Load an existing INI file
 let mut ini = Ini::load("config.ini").unwrap();
@@ -53,9 +53,12 @@ ini.add_section("Standalone");
 ini.remove("Player", "Height");
 ini.remove_section("Obsolete");
 
-// Turn a key off without losing its value ("; VSync = 1"), and back on
-ini.comment("Player", "VSync");
-ini.uncomment("Player", "VSync");
+// Turn a key off without losing its value ("; VSync = 1"), and back on.
+// Every line of the key is switched; a key written twice is reported.
+if let KeyToggle::Duplicate(n) = ini.comment("Player", "VSync") {
+    eprintln!("VSync is written {n} times in [Player]");
+}
+let _ = ini.uncomment("Player", "VSync");
 
 // Save back — comments and formatting preserved
 ini.save("config.ini").unwrap();
